@@ -1,0 +1,221 @@
+/**
+ * Migration script — idempotent, safe to run on every deploy.
+ * Adds missing columns and creates new tables if they don't exist.
+ * Run: node src/db/migrate.js
+ */
+require('dotenv').config();
+const pool = require('./pool');
+
+async function migrate() {
+  // ── ALTER migrations (add columns to existing tables) ────────
+  const alterMigrations = [
+    // bot_trades new columns
+    `ALTER TABLE bot_trades ADD COLUMN final_pnl DECIMAL(20,8) DEFAULT NULL`,
+    `ALTER TABLE bot_trades ADD COLUMN display_pnl DECIMAL(20,8) DEFAULT NULL`,
+    `ALTER TABLE bot_trades ADD COLUMN expected_profit DECIMAL(20,8) DEFAULT NULL`,
+    `ALTER TABLE bot_trades ADD COLUMN trade_duration_seconds INT DEFAULT NULL`,
+    `ALTER TABLE bot_trades ADD COLUMN timeframe VARCHAR(20) DEFAULT '1h'`,
+    `ALTER TABLE bot_trades ADD COLUMN close_reason VARCHAR(50) DEFAULT NULL`,
+    // bot_settings new columns
+    `ALTER TABLE bot_settings ADD COLUMN confidence_threshold DECIMAL(5,2) NOT NULL DEFAULT 45.00`,
+    `ALTER TABLE bot_settings ADD COLUMN trade_duration_seconds INT DEFAULT NULL`,
+    // deposits — rejection_reason column (may be missing on older DBs)
+    `ALTER TABLE deposits ADD COLUMN rejection_reason TEXT DEFAULT NULL`,
+    // deposits — screenshot column for payment proof uploads
+    `ALTER TABLE deposits ADD COLUMN screenshot MEDIUMTEXT DEFAULT NULL`,
+    // purchases — rejection_reason column
+    `ALTER TABLE purchases ADD COLUMN rejection_reason TEXT DEFAULT NULL`,
+    // ── v2: 3-step registration fields ──────────────────────────
+    // username: unique trading handle chosen at registration step 1
+    `ALTER TABLE users ADD COLUMN username VARCHAR(100) DEFAULT NULL`,
+    // phone already exists in schema but guard anyway
+    `ALTER TABLE users ADD COLUMN phone VARCHAR(50) DEFAULT NULL`,
+    // country already exists in schema but guard anyway
+    `ALTER TABLE users ADD COLUMN country VARCHAR(100) DEFAULT NULL`,
+    // platform_accounts deposit flow columns
+    `ALTER TABLE platform_accounts ADD COLUMN payment_method ENUM('bank_transfer','credit_card','wire_transfer','crypto') NOT NULL DEFAULT 'bank_transfer'`,
+    `ALTER TABLE platform_accounts ADD COLUMN bank_address VARCHAR(500) DEFAULT NULL`,
+    `ALTER TABLE platform_accounts ADD COLUMN my_address VARCHAR(500) DEFAULT NULL`,
+    `ALTER TABLE platform_accounts ADD COLUMN wallet_address VARCHAR(500) DEFAULT NULL`,
+    `ALTER TABLE platform_accounts ADD COLUMN network VARCHAR(100) DEFAULT NULL`,
+    `ALTER TABLE platform_accounts ADD COLUMN assigned_to ENUM('deposit','buy_crypto','buy_stock','all') NOT NULL DEFAULT 'deposit'`,
+  ];
+
+  // ── CREATE TABLE migrations (new tables) ─────────────────────
+  const createMigrations = [
+    // Enhanced user notifications (with category, priority, metadata)
+    `CREATE TABLE IF NOT EXISTS user_notifications (
+      id            INT AUTO_INCREMENT PRIMARY KEY,
+      user_id       INT NOT NULL,
+      title         VARCHAR(255) NOT NULL,
+      message       TEXT NOT NULL,
+      type          VARCHAR(50) DEFAULT 'info',
+      category      VARCHAR(50) DEFAULT 'system_alerts',
+      priority      ENUM('low','medium','high','urgent') NOT NULL DEFAULT 'medium',
+      is_read       TINYINT(1) NOT NULL DEFAULT 0,
+      related_id    VARCHAR(100) DEFAULT NULL,
+      related_type  VARCHAR(100) DEFAULT NULL,
+      metadata      JSON DEFAULT NULL,
+      created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )`,
+
+    // Admin notifications
+    `CREATE TABLE IF NOT EXISTS admin_notifications (
+      id            INT AUTO_INCREMENT PRIMARY KEY,
+      title         VARCHAR(255) NOT NULL,
+      message       TEXT NOT NULL,
+      type          VARCHAR(50) DEFAULT 'info',
+      priority      ENUM('low','medium','high','urgent') NOT NULL DEFAULT 'medium',
+      is_read       TINYINT(1) NOT NULL DEFAULT 0,
+      related_id    VARCHAR(100) DEFAULT NULL,
+      related_type  VARCHAR(100) DEFAULT NULL,
+      user_id       INT DEFAULT NULL,
+      metadata      JSON DEFAULT NULL,
+      created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )`,
+
+    // User notification settings
+    `CREATE TABLE IF NOT EXISTS notification_settings (
+      id                  INT AUTO_INCREMENT PRIMARY KEY,
+      user_id             INT NOT NULL UNIQUE,
+      email_enabled       TINYINT(1) NOT NULL DEFAULT 1,
+      in_app_enabled      TINYINT(1) NOT NULL DEFAULT 1,
+      email_deposits      TINYINT(1) NOT NULL DEFAULT 1,
+      email_withdrawals   TINYINT(1) NOT NULL DEFAULT 1,
+      email_trades        TINYINT(1) NOT NULL DEFAULT 1,
+      email_bot_activity  TINYINT(1) NOT NULL DEFAULT 1,
+      email_profit_loss   TINYINT(1) NOT NULL DEFAULT 1,
+      email_security      TINYINT(1) NOT NULL DEFAULT 1,
+      email_system        TINYINT(1) NOT NULL DEFAULT 0,
+      app_deposits        TINYINT(1) NOT NULL DEFAULT 1,
+      app_withdrawals     TINYINT(1) NOT NULL DEFAULT 1,
+      app_trades          TINYINT(1) NOT NULL DEFAULT 1,
+      app_bot_activity    TINYINT(1) NOT NULL DEFAULT 1,
+      app_profit_loss     TINYINT(1) NOT NULL DEFAULT 1,
+      app_security        TINYINT(1) NOT NULL DEFAULT 1,
+      app_system          TINYINT(1) NOT NULL DEFAULT 1,
+      app_price_alerts    TINYINT(1) NOT NULL DEFAULT 1,
+      created_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )`,
+
+    // Admin notification settings
+    `CREATE TABLE IF NOT EXISTS admin_notification_settings (
+      id                  INT AUTO_INCREMENT PRIMARY KEY,
+      admin_id            INT NOT NULL UNIQUE,
+      email_enabled       TINYINT(1) NOT NULL DEFAULT 1,
+      email_deposits      TINYINT(1) NOT NULL DEFAULT 1,
+      email_withdrawals   TINYINT(1) NOT NULL DEFAULT 1,
+      email_trades        TINYINT(1) NOT NULL DEFAULT 1,
+      email_bot_activity  TINYINT(1) NOT NULL DEFAULT 0,
+      email_suspicious    TINYINT(1) NOT NULL DEFAULT 1,
+      email_failed_tx     TINYINT(1) NOT NULL DEFAULT 1,
+      email_user_reg      TINYINT(1) NOT NULL DEFAULT 1,
+      created_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (admin_id) REFERENCES users(id) ON DELETE CASCADE
+    )`,
+
+    // Bot strategy counters
+    `CREATE TABLE IF NOT EXISTS bot_strategy_counters (
+      user_id   INT          NOT NULL,
+      strategy  VARCHAR(100) NOT NULL,
+      wins      INT          NOT NULL DEFAULT 0,
+      losses    INT          NOT NULL DEFAULT 0,
+      total     INT          NOT NULL DEFAULT 0,
+      PRIMARY KEY (user_id, strategy),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )`,
+
+    // Email send log — required by emailService.logEmail()
+    `CREATE TABLE IF NOT EXISTS email_logs (
+      id            INT AUTO_INCREMENT PRIMARY KEY,
+      recipient     VARCHAR(255) NOT NULL,
+      subject       VARCHAR(500) NOT NULL,
+      status        ENUM('sent','failed') NOT NULL DEFAULT 'sent',
+      message_id    VARCHAR(255) DEFAULT NULL,
+      error_message TEXT DEFAULT NULL,
+      created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+
+    // Platform accounts — payment destinations for deposits/buys
+    `CREATE TABLE IF NOT EXISTS platform_accounts (
+      id              INT AUTO_INCREMENT PRIMARY KEY,
+      account_name    VARCHAR(255) NOT NULL,
+      payment_method  ENUM('bank_transfer','credit_card','wire_transfer','crypto') NOT NULL DEFAULT 'bank_transfer',
+      bank_name       VARCHAR(255) DEFAULT NULL,
+      account_number  VARCHAR(100) DEFAULT NULL,
+      routing_number  VARCHAR(100) DEFAULT NULL,
+      account_type    VARCHAR(100) DEFAULT NULL,
+      swift_code      VARCHAR(50) DEFAULT NULL,
+      bank_address    VARCHAR(500) DEFAULT NULL,
+      my_address      VARCHAR(500) DEFAULT NULL,
+      wallet_address  VARCHAR(500) DEFAULT NULL,
+      network         VARCHAR(100) DEFAULT NULL,
+      is_default      TINYINT(1) NOT NULL DEFAULT 0,
+      assigned_to     ENUM('deposit','buy_crypto','buy_stock','all') NOT NULL DEFAULT 'deposit',
+      status          ENUM('active','inactive') NOT NULL DEFAULT 'active',
+      created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+  ];
+
+  // ── Post-ALTER index migrations ───────────────────────────────
+  // Add unique index on username after the column exists.
+  // MySQL doesn't support IF NOT EXISTS on CREATE INDEX, so we catch the
+  // duplicate-key-name error (1061) and treat it as a no-op.
+  const indexMigrations = [
+    {
+      sql: `CREATE UNIQUE INDEX idx_users_username ON users (username)`,
+      label: 'idx_users_username',
+    },
+  ];
+
+  console.log('[migrate] Running ALTER migrations...');
+  for (const sql of alterMigrations) {
+    try {
+      await pool.query(sql);
+      console.log(`[migrate] OK: ${sql.slice(0, 80)}...`);
+    } catch (err) {
+      if (err.code === 'ER_DUP_FIELDNAME' || err.errno === 1060) {
+        console.log(`[migrate] SKIP (already exists): ${sql.slice(0, 60)}...`);
+      } else {
+        console.error(`[migrate] ERROR on ALTER: ${err.message}`);
+      }
+    }
+  }
+
+  console.log('[migrate] Running CREATE TABLE migrations...');
+  for (const sql of createMigrations) {
+    try {
+      await pool.query(sql);
+      const tableName = sql.match(/CREATE TABLE IF NOT EXISTS (\w+)/i)?.[1] ?? '?';
+      console.log(`[migrate] OK: table ${tableName} ensured`);
+    } catch (err) {
+      console.error(`[migrate] ERROR on CREATE: ${err.message}`);
+    }
+  }
+
+  console.log('[migrate] Running INDEX migrations...');
+  for (const { sql, label } of indexMigrations) {
+    try {
+      await pool.query(sql);
+      console.log(`[migrate] OK: index ${label} created`);
+    } catch (err) {
+      // 1061 = ER_DUP_KEYNAME — index already exists, safe to skip
+      if (err.errno === 1061) {
+        console.log(`[migrate] SKIP (index already exists): ${label}`);
+      } else {
+        console.error(`[migrate] ERROR on INDEX: ${err.message}`);
+      }
+    }
+  }
+
+  console.log('[migrate] Done.');
+  process.exit(0);
+}
+
+migrate();
