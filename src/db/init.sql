@@ -397,3 +397,16 @@ CREATE TABLE IF NOT EXISTS bot_strategy_counters (
 -- ALTER TABLE platform_accounts ADD COLUMN IF NOT EXISTS currency_accepted VARCHAR(100) DEFAULT NULL;
 -- ALTER TABLE platform_accounts ADD COLUMN IF NOT EXISTS coin_symbol VARCHAR(20) DEFAULT NULL;
 -- ALTER TABLE platform_accounts ADD COLUMN IF NOT EXISTS qr_code_image MEDIUMTEXT DEFAULT NULL;
+
+-- ── Support Messages ─────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS support_messages (
+  id          INT AUTO_INCREMENT PRIMARY KEY,
+  user_id     INT DEFAULT NULL,
+  name        VARCHAR(255) DEFAULT NULL,
+  email       VARCHAR(255) DEFAULT NULL,
+  subject     VARCHAR(255) NOT NULL,
+  message     TEXT NOT NULL,
+  status      ENUM('pending','resolved') NOT NULL DEFAULT 'pending',
+  created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+);
