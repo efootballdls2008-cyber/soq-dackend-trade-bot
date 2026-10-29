@@ -1,10 +1,10 @@
 /**
  * Email Service
- * Handles all email notifications for the platform using Resend
+ * Handles all email notifications for the platform using Nodemailer + Gmail SMTP
  * Brand: Charles Schwab Trading Platform
  * Colors: #0d0824 bg | #a28539 gold | #4ade80 green | #f59e0b amber | #f87171 red
  */
-const { Resend } = require('resend');
+const nodemailer = require('nodemailer');
 const pool = require('../db/pool');
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
@@ -14,55 +14,58 @@ const YEAR = new Date().getFullYear();
 
 class EmailService {
   constructor() {
-    this.resend = null;
+    this.transporter = null;
     this.initialized = false;
-    this.fromEmail  = process.env.EMAIL_FROM      || 'onboarding@resend.dev';
-    this.fromName   = process.env.EMAIL_FROM_NAME || 'Charles Schwab Trading Platform';
-    this.adminEmail = process.env.ADMIN_EMAIL     || 'admin@schwab-trading.com';
+    this.fromEmail  = process.env.GMAIL_USER        || process.env.EMAIL_FROM      || '';
+    this.fromName   = process.env.EMAIL_FROM_NAME   || 'Charles Schwab Trading Platform';
+    this.adminEmail = process.env.ADMIN_EMAIL       || this.fromEmail;
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Init
+  // Init — Gmail SMTP via App Password
   // ─────────────────────────────────────────────────────────────
   initialize() {
     if (this.initialized) return;
     if (process.env.EMAIL_ENABLED !== 'true') {
-      console.log('[EmailService] Email notifications disabled');
+      console.log('[EmailService] Email notifications disabled (EMAIL_ENABLED != true)');
       return;
     }
-    const apiKey = process.env.RESEND_API_KEY;
-    if (!apiKey) {
-      console.error('[EmailService] RESEND_API_KEY not set — emails will not be sent');
+    const user = process.env.GMAIL_USER;
+    const pass = process.env.GMAIL_APP_PASSWORD;
+    if (!user || !pass) {
+      console.error('[EmailService] GMAIL_USER or GMAIL_APP_PASSWORD not set — emails will not be sent');
       return;
     }
     try {
-      this.resend = new Resend(apiKey);
+      this.transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: { user, pass },
+      });
       this.initialized = true;
-      console.log('[EmailService] Resend initialized successfully');
+      console.log(`[EmailService] Gmail SMTP initialized for ${user}`);
     } catch (err) {
-      console.error('[EmailService] Failed to initialize Resend:', err.message);
+      console.error('[EmailService] Failed to initialize Gmail SMTP:', err.message);
     }
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Core send
+  // Core send — Nodemailer
   // ─────────────────────────────────────────────────────────────
   async sendEmail({ to, subject, html, text }) {
-    if (!this.initialized || !this.resend) {
+    if (!this.initialized || !this.transporter) {
       console.log('[EmailService] Email not sent — service not initialized');
       return { success: false, error: 'Email service not initialized' };
     }
     try {
-      const { data, error } = await this.resend.emails.send({
-        from: `${this.fromName} <${this.fromEmail}>`,
+      const info = await this.transporter.sendMail({
+        from: `"${this.fromName}" <${this.fromEmail}>`,
         to,
         subject,
         html,
         text: text || this.stripHtml(html),
       });
-      if (error) throw new Error(error.message || JSON.stringify(error));
-      await this.logEmail({ recipient: to, subject, status: 'sent', messageId: data.id });
-      return { success: true, messageId: data.id };
+      await this.logEmail({ recipient: to, subject, status: 'sent', messageId: info.messageId });
+      return { success: true, messageId: info.messageId };
     } catch (err) {
       console.error('[EmailService] Failed to send email:', err.message);
       await this.logEmail({ recipient: to, subject, status: 'failed', error: err.message });
@@ -466,6 +469,41 @@ class EmailService {
   // ─────────────────────────────────────────────────────────────
   // ADMIN EMAILS
   // ─────────────────────────────────────────────────────────────
+
+  /** Support request — sent to admin email with full user details */
+  async sendSupportRequestEmail({ userId, ticketRef, subject, message, priority, fullName, email, submitted }) {
+    const priorityColors = { high: '#f87171', medium: '#f59e0b', low: '#4ade80' };
+    const priorityBg     = { high: '#450a0a',  medium: '#451a03', low: '#052e16' };
+    const accentColor    = priorityColors[priority] || '#f59e0b';
+
+    const html = this._wrap(`
+      ${this._alertBanner(`🎫 New Support Request — ${subject}`, accentColor)}
+      <h2 style="color:#0d0824;margin-top:0;">Support Request Received</h2>
+      <p>A user has submitted a support request. Please review the details below and respond promptly.</p>
+      ${this._detailBox(
+        this._row('Ticket Ref',  `<strong style="color:#a28539;font-family:monospace;">${ticketRef}</strong>`) +
+        this._row('Subject',     `<strong>${subject}</strong>`) +
+        this._row('Priority',    this._badge(priority.toUpperCase(), accentColor, priorityBg[priority] || '#451a03')) +
+        this._row('Full Name',   fullName) +
+        this._row('Email',       `<a href="mailto:${email}" style="color:#a28539;">${email}</a>`) +
+        this._row('User ID',     `#${userId}`) +
+        this._row('Submitted',   submitted)
+      )}
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid ${accentColor};border-radius:0 8px 8px 0;padding:18px 20px;margin:20px 0;">
+        <p style="margin:0 0 8px 0;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:#64748b;">User Message</p>
+        <p style="margin:0;color:#1e293b;font-size:14px;line-height:1.75;white-space:pre-wrap;">${message.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>
+      </div>
+      ${this._button('Reply to User', `mailto:${email}`, accentColor)}
+      ${this._divider()}
+      <p style="color:#94a3b8;font-size:13px;margin:0;">This support request was submitted via the Charles Schwab Trading Platform. Log in to the <a href="${process.env.FRONTEND_URL || 'http://localhost:5174'}/admin" style="color:#a28539;">admin dashboard</a> to manage it.</p>
+    `);
+
+    return this.sendEmail({
+      to: this.adminEmail,
+      subject: `[Support #${ticketRef}] ${subject} — ${priority.toUpperCase()} Priority`,
+      html,
+    });
+  }
 
   async sendAdminNotification(title, message, type, relatedId = null, extraData = {}) {
     const date = new Date().toLocaleString('en-US', { dateStyle: 'long', timeStyle: 'short' });

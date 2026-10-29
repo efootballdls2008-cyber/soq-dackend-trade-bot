@@ -477,6 +477,7 @@ class NotificationService {
       'suspicious_activity': s.email_suspicious,
       'failed_transaction':  s.email_failed_tx,
       'user_registration':   s.email_user_reg,
+      'support_request':     true, // always notify admin of support requests
     };
 
     return mapping[type] !== false;
