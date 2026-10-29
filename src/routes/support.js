@@ -1,9 +1,12 @@
 /**
- * Support Route
- * POST /support — authenticated user submits a support message
- * The message triggers:
- *   1. A custom HTML email to the admin (via emailService)
- *   2. An in-app admin notification (via notificationService)
+ * Support Routes
+ * POST /support        — authenticated user submits a support request
+ * POST /support/contact — public contact form (no auth required)
+ *
+ * Each submission triggers:
+ *   1. A custom branded HTML email to the admin (via emailService)
+ *   2. An in-app admin notification + real-time socket push
+ *   3. (authenticated only) An in-app user confirmation notification
  */
 const express = require('express');
 const { body } = require('express-validator');
@@ -14,7 +17,6 @@ const emailService = require('../services/emailService');
 const notificationService = require('../services/notificationService');
 
 const router = express.Router();
-router.use(authenticate);
 
 const SUBJECT_OPTIONS = [
   'Account Issue',
@@ -26,9 +28,12 @@ const SUBJECT_OPTIONS = [
   'Other',
 ];
 
-// POST /support
+// ─────────────────────────────────────────────────────────────
+// POST /support  — authenticated user
+// ─────────────────────────────────────────────────────────────
 router.post(
   '/',
+  authenticate,
   [
     body('subject')
       .trim()
@@ -47,7 +52,6 @@ router.post(
       const userId = req.user.id;
       const { subject, message, priority = 'medium' } = req.body;
 
-      // Fetch user info for the email
       const [[user]] = await pool.query(
         'SELECT id, email, first_name, last_name FROM users WHERE id = ?',
         [userId]
@@ -58,19 +62,13 @@ router.post(
       const fullName  = `${user.first_name} ${user.last_name}`.trim();
       const submitted = new Date().toLocaleString('en-US', { dateStyle: 'long', timeStyle: 'short' });
 
-      // ── 1. Send HTML email to admin ──────────────────────────
+      // 1. Admin email
       emailService.sendSupportRequestEmail({
-        userId,
-        ticketRef,
-        subject,
-        message,
-        priority,
-        fullName,
-        email: user.email,
-        submitted,
+        userId, ticketRef, subject, message, priority,
+        fullName, email: user.email, submitted,
       }).catch(err => console.error('[Support] Email error:', err.message));
 
-      // ── 2. Admin in-app notification (real-time via socket) ──
+      // 2. Admin in-app notification (real-time via socket)
       const priorityLabel = priority.charAt(0).toUpperCase() + priority.slice(1);
       notificationService.createAdminNotification({
         title: `Support Request — ${subject}`,
@@ -83,7 +81,7 @@ router.post(
         metadata: { ticketRef, subject, priority, userName: fullName, userEmail: user.email },
       }).catch(err => console.error('[Support] Admin notification error:', err.message));
 
-      // ── 3. User in-app confirmation notification ─────────────
+      // 3. User in-app confirmation
       notificationService.createUserNotification({
         userId,
         title: 'Support Request Submitted',
@@ -98,6 +96,59 @@ router.post(
       res.json({
         success: true,
         message: 'Your support request has been submitted successfully.',
+        ticketRef,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ─────────────────────────────────────────────────────────────
+// POST /support/contact  — public (no auth required)
+// ─────────────────────────────────────────────────────────────
+router.post(
+  '/contact',
+  [
+    body('name').trim().notEmpty().withMessage('Name is required'),
+    body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
+    body('subject').trim().notEmpty().withMessage('Subject is required'),
+    body('message')
+      .trim()
+      .isLength({ min: 10, max: 2000 }).withMessage('Message must be between 10 and 2000 characters'),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { name, email, subject, message } = req.body;
+      const submitted = new Date().toLocaleString('en-US', { dateStyle: 'long', timeStyle: 'short' });
+      const ticketRef = `CON-${Date.now()}`;
+
+      // Admin email
+      emailService.sendSupportRequestEmail({
+        userId: null,
+        ticketRef,
+        subject,
+        message,
+        priority: 'medium',
+        fullName: name,
+        email,
+        submitted,
+      }).catch(err => console.error('[Contact] Email error:', err.message));
+
+      // Admin in-app notification
+      notificationService.createAdminNotification({
+        title: `Contact Form — ${subject}`,
+        message: `${name} (${email}) sent a contact message: "${message.slice(0, 120)}${message.length > 120 ? '…' : ''}"`,
+        type: 'support_request',
+        priority: 'medium',
+        relatedType: 'contact',
+        metadata: { ticketRef, subject, userName: name, userEmail: email },
+      }).catch(err => console.error('[Contact] Admin notification error:', err.message));
+
+      res.json({
+        success: true,
+        message: 'Your message has been sent successfully. We will get back to you soon.',
         ticketRef,
       });
     } catch (err) {
